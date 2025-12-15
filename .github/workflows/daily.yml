@@ -1,21 +1,20 @@
 name: 📅 飞书日报机器人
 
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
   schedule:
-    - cron: '0 15 * * *'  # UTC 15:00 = 北京时间 23:00
+    - cron: '0 15 * * *'
 
 jobs:
   summarize:
     runs-on: ubuntu-latest
     steps:
-      - name: 发送日报到飞书
+      - name: 发送测试消息到飞书
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
         run: |
-          TODAY=$(date +%Y-%m-%d)
-          MESSAGE="📅 **${TODAY} 日报**\n\n💡 今日想法：\n- 暂无记录（请在飞书文档中补充）"
+          MESSAGE="✅ GitHub Actions 测试成功！时间：$(date)"
           
-          curl -X POST $FEISHU_WEBHOOK \
+          curl -X POST "$FEISHU_WEBHOOK" \
             -H 'Content-Type: application/json' \
-            -d "{\"msg_type\":\"post\",\"post\":{\"zh_cn\":{\"title\":\"${TODAY} 日报\",\"content\":[[{\"tag\":\"text\",\"text\":\"$MESSAGE\"}]]}}}"
+            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"$MESSAGE\"}}"
