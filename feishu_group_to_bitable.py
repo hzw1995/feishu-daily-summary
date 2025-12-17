@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 飞书群想法 → AI 日报（多维表格）
-功能：每天自动读取指定群聊的文本消息，用 Qwen 生成总结，并写入多维表格。
+适配字段：日期（日期类型）、原始想法（文本）、AI总结（文本）
 """
 
 import os
@@ -33,13 +33,11 @@ def get_tenant_access_token():
 
 def get_messages(token, chat_id):
     """获取群聊中今天（北京时间）的所有文本消息"""
-    # 定义北京时间
     BJ = timezone(timedelta(hours=8))
     now_bj = datetime.now(BJ)
     today_start_bj = now_bj.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end_bj = now_bj.replace(hour=23, minute=59, second=59, microsecond=999999)
 
-    # 转为 UTC 毫秒时间戳（飞书 API 要求字符串）
     start_time = str(int(today_start_bj.timestamp() * 1000))
     end_time = str(int(today_end_bj.timestamp() * 1000))
 
@@ -61,9 +59,14 @@ def get_messages(token, chat_id):
 
         headers = {"Authorization": f"Bearer {token}"}
         resp = requests.get(f"{FEISHU_BASE}/im/v1/messages", headers=headers, params=params)
-        data = resp.json()
+        try:
+            data = resp.json()
+        except json.JSONDecodeError:
+            print("⚠️ 飞书消息 API 返回非 JSON 响应")
+            print("原始响应:", resp.text[:300])
+            break
 
-        if data["code"] != 0:
+        if data.get("code") != 0:
             print(f"⚠️ 获取消息失败: {data}")
             break
 
@@ -72,18 +75,17 @@ def get_messages(token, chat_id):
             if item["msg_type"] == "text":
                 try:
                     text = json.loads(item["body"]["content"])["text"].strip()
-                    if text:  # 忽略空消息
+                    if text:
                         messages.append(text)
-                except:
-                    continue  # 跳过解析失败的消息
+                except Exception as e:
+                    continue
 
-        # 分页
         page_token = data["data"].get("page_token")
         if not page_token:
             break
 
     print(f"📥 共获取到 {len(messages)} 条有效文本消息")
-    for i, msg in enumerate(messages[:3], 1):  # 只打印前3条
+    for i, msg in enumerate(messages[:3], 1):
         print(f"  [{i}] {msg[:60]}{'...' if len(msg) > 60 else ''}")
     if len(messages) > 3:
         print(f"  ... 还有 {len(messages) - 3} 条")
@@ -113,7 +115,12 @@ def generate_summary(messages):
     }
 
     resp = requests.post(DASHSCOPE_URL, headers=headers, json=payload)
-    result = resp.json()
+    try:
+        result = resp.json()
+    except json.JSONDecodeError:
+        print("❌ Qwen API 返回非 JSON")
+        print("原始响应:", resp.text[:300])
+        return "AI 总结生成失败，请检查 DashScope 配额。"
 
     if resp.status_code != 200 or "output" not in result:
         print(f"❌ Qwen 调用失败: {result}")
@@ -123,18 +130,21 @@ def generate_summary(messages):
     print(f"🤖 AI 总结: {summary}")
     return summary
 
-def write_to_bitable(token, summary):
-    """写入多维表格"""
+def write_to_bitable(token, messages, summary):
+    """写入多维表格（字段：日期、原始想法、AI总结）"""
     url = f"{FEISHU_BASE}/bitable/v1/apps/{BITABLE_APP_TOKEN}/tables/{BITABLE_TABLE_ID}/records"
     
-    # ⚠️ 注意：字段名必须和你的多维表格「字段名」完全一致！
-    # 假设你的表格有两列：「日期」、「内容」
-    beijing_date = (datetime.now(timezone(timedelta(hours=8)))).strftime("%Y-%m-%d")
+    # 日期字段：传 YYYY-MM-DD 字符串，飞书会自动转为日期类型
+    beijing_date_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
     
+    # 原始想法：合并为多行文本
+    raw_ideas = "\n".join(f"- {msg}" for msg in messages) if messages else "无"
+
     payload = {
         "fields": {
-            "日期": beijing_date,
-            "内容": summary
+            "日期": beijing_date_str,      # ← 飞书日期类型字段
+            "原始想法": raw_ideas,         # ← 文本字段
+            "AI总结": summary              # ← 文本字段
         }
     }
 
@@ -143,38 +153,49 @@ def write_to_bitable(token, summary):
         "Content-Type": "application/json; charset=utf-8"
     }
 
+    print("📝 准备写入多维表格...")
+    print(f"  日期: {beijing_date_str}")
+    print(f"  原始想法 (前100字符): {raw_ideas[:100]}{'...' if len(raw_ideas) > 100 else ''}")
+    print(f"  AI总结: {summary}")
+
     resp = requests.post(url, headers=headers, data=json.dumps(payload, ensure_ascii=False).encode('utf-8'))
-    result = resp.json()
+
+    print(f"📡 写入请求状态码: {resp.status_code}")
+    print(f"📄 Content-Type: {resp.headers.get('content-type', 'unknown')}")
+
+    try:
+        result = resp.json()
+        print(f"📦 API 响应: {result}")
+    except json.JSONDecodeError:
+        print("❌ 非 JSON 响应！可能是权限不足或 ID 错误")
+        print("原始响应内容（前500字符）:")
+        print(resp.text[:500])
+        raise Exception("写入失败：飞书 API 返回无效响应")
 
     if result.get("code") == 0:
         print("✅ 成功写入多维表格！")
         return True
     else:
-        print(f"❌ 写入表格失败: {result}")
+        print(f"❌ 写入失败: {result}")
         return False
 
 # === 主程序 ===
 def main():
-    print("🚀 开始执行：飞书群想法 → AI 日报")
+    print("🚀 开始执行：飞书群想法 → AI 日报（适配你的表格结构）")
     
     try:
-        # 1. 获取飞书 token
         token = get_tenant_access_token()
         print("🔑 飞书 token 获取成功")
 
-        # 2. 读取消息
         messages = get_messages(token, FEISHU_CHAT_ID)
-        
-        # 3. 生成总结
         summary = generate_summary(messages)
         
-        # 4. 写入表格
-        success = write_to_bitable(token, summary)
+        success = write_to_bitable(token, messages, summary)
         
         if success:
-            print("🎉 任务完成！明日再见~")
+            print("🎉 任务完成！数据已写入多维表格。")
         else:
-            print("⚠️ 任务部分失败，请检查日志")
+            print("⚠️ 写入失败，请检查日志和飞书应用权限。")
 
     except Exception as e:
         print(f"💥 程序异常: {e}")
